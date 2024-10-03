@@ -1,0 +1,71 @@
+
+# Used the Secret Manager to pass the .env variables commit
+steps:        
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - -c
+      - |
+        # Retrieve secrets from Secret Manager and write them to a .env file
+        gcloud secrets versions access latest --secret=usm-backend-env --format='get(payload.data)' | tr '_-' '/+' | base64 -d > .env
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+    'build', 
+    '-t', '${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/${_IMAGE}:${BRANCH_NAME}', 
+    '--build-arg', 'ENV=${_ENV}', # Pass the environment variable
+    '--build-arg', 'SECRET_ENV_FILE=.env', # Pass the .env file as a build arg
+    '.'
+      ]
+  # Build the Docker image for the ums-backend
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', '${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/${_IMAGE}:${BRANCH_NAME}', '.']
+
+  # Push the Docker image to Google Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/${_IMAGE}:${BRANCH_NAME}']
+
+  # Deploy using Helm
+  - name: 'google/cloud-sdk:slim'
+    entrypoint: 'sh'
+    args:
+      - -c
+      - |
+        # Install kubectl and gke-gcloud-auth-plugin
+        apt-get update && apt-get install -y kubectl google-cloud-cli-gke-gcloud-auth-plugin
+
+        # Authenticate with GKE
+        gcloud config set project ${_PROJECT_ID}
+        gcloud config set compute/zone ${_ZONE}
+        gcloud container clusters get-credentials ${_CLUSTER} --region ${_ZONE}
+        
+        # Install Helm
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        
+        # Verify installation
+        helm version
+        
+        # Debug Kubernetes context
+        kubectl config view
+        
+        # Create namespace if it doesn't exist
+        kubectl create namespace ums-backend || echo "Namespace ums-backend already exists"
+        
+        # Update image and tag in values.yaml
+        sed -i '/nodejs:/,/repository:/s|repository:.*|repository: ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/${_IMAGE}|' ./ums-backend-helm/values.yaml
+        sed -i '/nodejs:/,/tag:/s|tag:.*|tag: ${BRANCH_NAME}|' ./ums-backend-helm/values.yaml
+        cat /ums-backend-helm/values.yaml 
+        # Deploy using Helm
+        helm upgrade --install ums-backend-release ./ums-backend-helm --namespace ums-backend
+          
+
+substitutions:
+  _REGION: asia-south1
+  _ZONE: asia-south1-a
+  _CLUSTER: ums-backend-cluster-1
+  _ENV: staging
+  _SEVERITY: CRITICAL
+  _PROJECT_ID: plutos-stage-project
+  _IMAGE: ums-backend-image
+  _REPO: gke-repo
+options:
+  logging: CLOUD_LOGGING_ONLY
